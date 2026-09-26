@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FluxCapturer", "FluxCapturer\FluxCapturer.csproj", "{D7B90A5A-91B6-4B5B-88EF-8465B39CB8B6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FluxCapturer.Client", "FluxCapturer.Client\FluxCapturer.Client.csproj", "{B1C92E21-4D72-4E7B-A12B-6D7F5A23C901}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D7B90A5A-91B6-4B5B-88EF-8465B39CB8B6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D7B90A5A-91B6-4B5B-88EF-8465B39CB8B6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D7B90A5A-91B6-4B5B-88EF-8465B39CB8B6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D7B90A5A-91B6-4B5B-88EF-8465B39CB8B6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B1C92E21-4D72-4E7B-A12B-6D7F5A23C901}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B1C92E21-4D72-4E7B-A12B-6D7F5A23C901}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B1C92E21-4D72-4E7B-A12B-6D7F5A23C901}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B1C92E21-4D72-4E7B-A12B-6D7F5A23C901}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
