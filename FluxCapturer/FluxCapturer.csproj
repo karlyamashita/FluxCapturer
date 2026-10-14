@@ -1,3 +1,4 @@
+
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -12,8 +13,16 @@
     <Company>KTY Labs</Company>
     <Product>Flux Capturer</Product>
   </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Update="FluxCapturer.ini"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <Import Project="..\Versions.props" />
 </Project>

@@ -26,18 +26,22 @@ try
     {
         using var server = new FluxCapturerServer();
         var transportHost = new FluxTransportHost();
+        // Optional device adapter: the transport core remains protocol-neutral.
+        FluxTransportHost.SerialBytesReceived += (port, bytes) =>
+            PicoIlaCapture.OnSerialBytes(port, bytes.Span);
         Console.WriteLine("Flux Capturer host ready.");
         Task sharedMemoryTask = server.RunAsync(cancellation.Token);
         Task transportTask = transportHost.RunAsync(cancellation.Token);
+        Task ilaTask = new IlaBridgeHost().RunAsync(cancellation.Token);
         if (standalone)
         {
             Console.WriteLine("Flux Capturer standalone mode. Press Ctrl+C to exit.");
-            await Task.WhenAll(sharedMemoryTask, transportTask);
+            await Task.WhenAll(sharedMemoryTask, transportTask, ilaTask);
         }
         else
         {
             Task ownerMonitorTask = MonitorOwnerApplicationsAsync(cancellation);
-            await Task.WhenAll(sharedMemoryTask, transportTask, ownerMonitorTask);
+            await Task.WhenAll(sharedMemoryTask, transportTask, ilaTask, ownerMonitorTask);
         }
         return 0;
     }

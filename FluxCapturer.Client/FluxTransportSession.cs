@@ -148,13 +148,22 @@ public sealed class FluxTransportSession : IAsyncDisposable
                 throw new InvalidDataException($"Unexpected Flux runtime frame type {frame.Type}.");
             }
         }
-        catch (OperationCanceledException) { }
-        catch (EndOfStreamException) { }
-        catch (IOException) { }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
             FailPendingSends(ex);
-            Faulted?.Invoke(this, ex.Message);
+            try { Faulted?.Invoke(this, ex.Message); } catch { }
+        }
+        finally
+        {
+            // Pipe disconnection is not necessarily reflected immediately by
+            // NamedPipeClientStream.IsConnected. Never strand outstanding TX ACKs.
+            FailPendingSends(new IOException("Flux Capturer transport receive loop ended."));
+            if (ReferenceEquals(_pipe, pipe))
+            {
+                _pipe = null;
+                try { pipe.Dispose(); } catch { }
+            }
         }
     }
 

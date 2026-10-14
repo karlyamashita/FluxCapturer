@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.IO.Ports;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -80,6 +81,84 @@ public sealed class FluxTransportHost
         }
     }
 
+
+    // Device-agnostic serial registry and passive RX subscribers.
+    private sealed class ConnectedSerial
+    {
+        public required SerialPort Serial;
+        public readonly object WriteGate = new();
+        public readonly StringBuilder ReplyLine = new();
+        public PendingReply? Pending;
+    }
+    private sealed record PendingReply(Func<string, bool> Match, TaskCompletionSource<string> Completion);
+    private static readonly object SerialGate = new();
+    private static readonly Dictionary<string, ConnectedSerial> SerialPorts = new(StringComparer.OrdinalIgnoreCase);
+    internal static event Action<string, ReadOnlyMemory<byte>>? SerialBytesReceived;
+
+    internal static async Task<string> SendSerialCommandAsync(
+        string portName, string command, Func<string, bool> replyMatcher,
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        ConnectedSerial port;
+        lock (SerialGate)
+        {
+            if (!SerialPorts.TryGetValue(portName, out port!)) return "ERR DEVICE_NOT_CONNECTED";
+        }
+        var completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (port.WriteGate)
+        {
+            if (!port.Serial.IsOpen) return "ERR DEVICE_DISCONNECTED";
+            if (port.Pending is not null) return "ERR COMMAND_ALREADY_PENDING";
+            port.Pending = new PendingReply(replyMatcher, completion);
+            try { port.Serial.Write(command.TrimEnd('\r', '\n') + "\r\n"); }
+            catch (Exception ex)
+            {
+                port.Pending = null;
+                return "ERR COMMAND_WRITE_FAILED " + ex.Message;
+            }
+        }
+        try { return await completion.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false); }
+        catch (TimeoutException) { return "ERR COMMAND_TIMEOUT"; }
+        finally
+        {
+            lock (port.WriteGate)
+                if (ReferenceEquals(port.Pending?.Completion, completion)) port.Pending = null;
+        }
+    }
+
+    private static void NotifySerialRx(string portName, ReadOnlyMemory<byte> bytes)
+    {
+        ConnectedSerial? port;
+        lock (SerialGate) SerialPorts.TryGetValue(portName, out port);
+        if (port is not null)
+        {
+            lock (port.WriteGate)
+            {
+                foreach (byte b in bytes.Span)
+                {
+                    if (b == (byte)'\n')
+                    {
+                        string line = port.ReplyLine.ToString().Trim();
+                        port.ReplyLine.Clear();
+                        if (port.Pending is { } pending && pending.Match(line))
+                        {
+                            port.Pending = null;
+                            pending.Completion.TrySetResult(line);
+                        }
+                    }
+                    else if (b == (byte)'\r') { }
+                    else if (port.ReplyLine.Length < 8192) port.ReplyLine.Append((char)b);
+                    else port.ReplyLine.Clear();
+                }
+            }
+        }
+        // An adapter failure must never stop raw transport.
+        var subscribers = SerialBytesReceived;
+        if (subscribers is not null)
+            foreach (Action<string, ReadOnlyMemory<byte>> subscriber in subscribers.GetInvocationList())
+                try { subscriber(portName, bytes); }
+                catch (Exception ex) { DebugLogError("RX adapter: " + ex.Message); }
+    }
 
     public const string PipeName = "KTYLabs_FluxCapturer_Transport_v1";
     private const byte RuntimeTxData = 1;
@@ -185,6 +264,8 @@ public sealed class FluxTransportHost
             $"Opening {request.PortName} @ {request.BaudRate:N0}...");
 
         serial.Open();
+        var connectedPort = new ConnectedSerial { Serial = serial };
+        lock (SerialGate) SerialPorts[serial.PortName] = connectedPort;
 
         DebugLog(
             $"OPEN OK: {serial.PortName}, IsOpen={serial.IsOpen}");
@@ -197,11 +278,28 @@ public sealed class FluxTransportHost
         Task rx = PumpSerialRxAsync(serial, pipe, pipeWriteGate, cancellationToken);
         Task tx = PumpSerialTxAsync(pipe, pipeWriteGate, serial, request.Rs485Rts, cancellationToken);
 
-        Task completed = await Task.WhenAny(rx, tx).ConfigureAwait(false);
+        Task completed;
+        try { completed = await Task.WhenAny(rx, tx).ConfigureAwait(false); }
+        finally
+        {
+            lock (SerialGate)
+                if (SerialPorts.TryGetValue(serial.PortName, out var registered) &&
+                    ReferenceEquals(registered, connectedPort)) SerialPorts.Remove(serial.PortName);
+        }
 
-        DebugLog(
-            $"Serial pump ended: " +
-            $"{(ReferenceEquals(completed, rx) ? "RX" : "TX")} status={completed.Status}");
+        DebugLog($"Serial pump ended: {(ReferenceEquals(completed, rx) ? "RX" : "TX")} status={completed.Status}");
+        // A failed/closed pump terminates the whole transport. Cancel its partner
+        // before releasing SerialPort so a subsequent Open can reclaim the COM port.
+        // HandleClientAsync owns the linked token and the pipe lifetime.
+        if (completed.IsFaulted)
+        {
+            DebugLogError($"Serial pump fault on {serial.PortName}: {completed.Exception}");
+            await completed.ConfigureAwait(false);
+        }
+        if (completed.IsCanceled && !cancellationToken.IsCancellationRequested)
+            throw new IOException($"Serial pump unexpectedly canceled on {serial.PortName}.");
+        if (!cancellationToken.IsCancellationRequested)
+            throw new IOException($"Serial {(ReferenceEquals(completed, rx) ? "RX" : "TX")} pump ended unexpectedly on {serial.PortName}.");
     }
 
     private static async Task OpenTcp(
@@ -244,9 +342,16 @@ public sealed class FluxTransportHost
                 $"{Convert.ToHexString(buffer.AsSpan(0, read))}");
 
             ulong sequence = ++rxSequence;
-            await FluxBoundaryTrace.LogSerialRxAsync(
-                serial.PortName, sequence, buffer.AsMemory(0, read), cancellationToken)
-                .ConfigureAwait(false);
+            try
+            {
+                await FluxBoundaryTrace.LogSerialRxAsync(
+                    serial.PortName, sequence, buffer.AsMemory(0, read), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex) { DebugLogError($"RX trace error: {ex}"); }
+
+            NotifySerialRx(serial.PortName, buffer.AsMemory(0, read));
 
             await WriteRuntimeFrameAsync(pipe, pipeWriteGate, RuntimeRxData, sequence,
                 buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
@@ -284,7 +389,15 @@ public sealed class FluxTransportHost
                 DebugLog(
                     $"TX writing {frame.Payload.Length} byte(s) to {serial.PortName}...");
 
-                await serial.BaseStream.WriteAsync(frame.Payload, cancellationToken).ConfigureAwait(false);
+                // Share the write gate with generic device commands.
+                lock (SerialGate)
+                {
+                    if (SerialPorts.TryGetValue(serial.PortName, out var active))
+                    {
+                        lock (active.WriteGate) serial.Write(frame.Payload, 0, frame.Payload.Length);
+                    }
+                    else serial.Write(frame.Payload, 0, frame.Payload.Length);
+                }
 
                 if (rs485Rts)
                 {
@@ -301,9 +414,14 @@ public sealed class FluxTransportHost
                     $"TX WRITE OK: {serial.PortName}, " +
                     $"{frame.Payload.Length} byte(s), BytesToWrite={serial.BytesToWrite}");
 
-                await FluxBoundaryTrace.LogSerialTxAsync(
-                    serial.PortName, frame.Sequence, frame.Payload, cancellationToken)
-                    .ConfigureAwait(false);
+                try
+                {
+                    await FluxBoundaryTrace.LogSerialTxAsync(
+                        serial.PortName, frame.Sequence, frame.Payload, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception ex) { DebugLogError($"TX trace error: {ex}"); }
 
                 // Normal serial/VCOM traffic is acknowledged as soon as the OS accepts
                 // the write. Do not make CC wait for a full UART drain or diagnostic I/O.
